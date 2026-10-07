@@ -1,0 +1,16 @@
+项目：google-go-containerregistry｜题目 ID：google-go-containerregistry-3427efa8-87f0-4685-9ed2-fe038c431a0c
+固定基线：017b006984036cc747b9bd4ed6eb2d59ee7a49dc｜Session：586499748533644:e752f586b78ac12f2086793dea025540_6ac5eada419aca978daa036d.6ac5eada419aca978daa0370.6ac5eada419aca978daa036e:TraeCode CN.3.3.104.no_sid.no_ppe.T(2026/10/7 14:46:50)
+Harness：Trae｜有效轮数：80｜来源：count-trae-cn-steps.py｜范围：latest_turn
+完成度：完成｜收录结论：不收录
+验证命令：go test -count=1 ./pkg/v1/remote (repeated 3 times)
+
+Rubric ID：1｜状态：通过｜期望行为：发布开始先验证所有平台 descriptor、config 和 layer 的关系，缺失内容不会更新目标 tag。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/remote/pusher.go; pkg/v1/remote/publish.go; pkg/v1/remote/publish_test.go；go test -count=1 ./pkg/v1/remote (repeated 3 times)
+Rubric ID：2｜状态：通过｜期望行为：目标仓库只在全部子 manifest 与必需 blob 校验完成后让新 tag 可见。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/remote/pusher.go; pkg/v1/remote/publish.go; pkg/v1/remote/publish_test.go；go test -count=1 ./pkg/v1/remote (repeated 3 times)
+Rubric ID：3｜状态：通过｜期望行为：上传、认证、manifest 或 tag 更新失败时旧 tag 和既有镜像仍可拉取。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/remote/pusher.go; pkg/v1/remote/publish.go; pkg/v1/remote/publish_test.go；go test -count=1 ./pkg/v1/remote (repeated 3 times)
+Rubric ID：4｜状态：通过｜期望行为：重试会复用相同 digest 的已确认 blob，不重复写入或删除其他 tag 正在引用的对象。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/remote/pusher.go; pkg/v1/remote/publish.go; pkg/v1/remote/publish_test.go；go test -count=1 ./pkg/v1/remote (repeated 3 times)
+Rubric ID：5｜状态：通过｜期望行为：进程重启或连接超时后能区分已确认、待重试和未发布对象并收敛到唯一结果。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/remote/pusher.go; pkg/v1/remote/publish.go; pkg/v1/remote/publish_test.go；go test -count=1 ./pkg/v1/remote (repeated 3 times)
+Rubric ID：6｜状态：通过｜期望行为：同一 tag 的并发发布不会产生混合平台清单，较旧发布不能覆盖较新成功结果。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/remote/pusher.go; pkg/v1/remote/publish.go; pkg/v1/remote/publish_test.go；go test -count=1 ./pkg/v1/remote (repeated 3 times)
+Rubric ID：7｜状态：通过｜期望行为：Image、Copy、WriteLayer、不同 registry transport、认证缓存和只读拉取保持兼容。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/remote/pusher.go; pkg/v1/remote/publish.go; pkg/v1/remote/publish_test.go；go test -count=1 ./pkg/v1/remote (repeated 3 times)
+
+Prompt-Rubric 对齐：冻结 Prompt 已拆分为入口、状态、失败恢复、重启、并发和兼容性要求；每条 Rubric 均可回指原始 Prompt，未增加接口、文件、错误码、性能或部署条件。
+审计边界：仅使用本题固定版本、一次 Session、冻结 Rubric 和当前项目改动；未使用其他题目、其他 Session 或重跑材料替代原始运行事实。

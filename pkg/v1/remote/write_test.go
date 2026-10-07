@@ -598,6 +598,7 @@ func TestDedupeLayers(t *testing.T) {
 	uploadPath := "/upload"
 	commitPath := "/commit"
 	var numUploads int32
+	var storedManifest []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, headPathPrefix) && r.URL.Path != initiatePath {
 			http.Error(w, "NotFound", http.StatusNotFound)
@@ -623,14 +624,25 @@ func TestDedupeLayers(t *testing.T) {
 			http.Error(w, "Created", http.StatusCreated)
 		case manifestPath:
 			if r.Method == http.MethodHead {
-				w.Header().Set("Content-Type", string(types.DockerManifestSchema1Signed))
-				w.Header().Set("Docker-Content-Digest", fakeDigest)
-				w.Write([]byte("doesn't matter"))
+				if storedManifest == nil {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				h, _, _ := v1.SHA256(bytes.NewReader(storedManifest))
+				w.Header().Set("Content-Type", string(types.DockerManifestSchema2))
+				w.Header().Set("Docker-Content-Digest", h.String())
+				w.Header().Set("Content-Length", fmt.Sprint(len(storedManifest)))
+				w.WriteHeader(http.StatusOK)
 				return
 			}
 			if r.Method != http.MethodPut {
 				t.Errorf("Method; got %v, want %v", r.Method, http.MethodPut)
 			}
+			b, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("ReadAll(Body) = %v", err)
+			}
+			storedManifest = b
 			http.Error(w, "Created", http.StatusCreated)
 		default:
 			t.Fatalf("Unexpected path: %v", r.URL.Path)
@@ -981,6 +993,15 @@ func TestWrite(t *testing.T) {
 	initiatePath := fmt.Sprintf("/v2/%s/blobs/uploads/", expectedRepo)
 	manifestPath := fmt.Sprintf("/v2/%s/manifests/latest", expectedRepo)
 
+	var storedManifest []byte
+	serveStoredManifest := func(w http.ResponseWriter) {
+		h, _, _ := v1.SHA256(bytes.NewReader(storedManifest))
+		w.Header().Set("Content-Type", string(types.DockerManifestSchema2))
+		w.Header().Set("Docker-Content-Digest", h.String())
+		w.Header().Set("Content-Length", fmt.Sprint(len(storedManifest)))
+		w.WriteHeader(http.StatusOK)
+	}
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, headPathPrefix) && r.URL.Path != initiatePath {
 			http.Error(w, "NotFound", http.StatusNotFound)
@@ -996,12 +1017,21 @@ func TestWrite(t *testing.T) {
 			http.Error(w, "Mounted", http.StatusCreated)
 		case manifestPath:
 			if r.Method == http.MethodHead {
-				w.WriteHeader(http.StatusNotFound)
+				if storedManifest == nil {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				serveStoredManifest(w)
 				return
 			}
 			if r.Method != http.MethodPut {
 				t.Errorf("Method; got %v, want %v", r.Method, http.MethodPut)
 			}
+			b, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("ReadAll(Body) = %v", err)
+			}
+			storedManifest = b
 			http.Error(w, "Created", http.StatusCreated)
 		default:
 			t.Fatalf("Unexpected path: %v", r.URL.Path)
@@ -1302,6 +1332,8 @@ func TestWriteIndex(t *testing.T) {
 	existingChildDigest := mustIndexManifest(t, idx).Manifests[1].Digest
 	existingChildPath := fmt.Sprintf("/v2/%s/manifests/%s", expectedRepo, existingChildDigest)
 
+	var storedIndex []byte
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, headPathPrefix) && r.URL.Path != initiatePath {
 			http.Error(w, "NotFound", http.StatusNotFound)
@@ -1317,12 +1349,25 @@ func TestWriteIndex(t *testing.T) {
 			http.Error(w, "Mounted", http.StatusCreated)
 		case manifestPath:
 			if r.Method == http.MethodHead {
-				w.WriteHeader(http.StatusNotFound)
+				if storedIndex == nil {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				h, _, _ := v1.SHA256(bytes.NewReader(storedIndex))
+				w.Header().Set("Content-Type", string(types.OCIImageIndex))
+				w.Header().Set("Docker-Content-Digest", h.String())
+				w.Header().Set("Content-Length", fmt.Sprint(len(storedIndex)))
+				w.WriteHeader(http.StatusOK)
 				return
 			}
 			if r.Method != http.MethodPut {
 				t.Errorf("Method; got %v, want %v", r.Method, http.MethodPut)
 			}
+			b, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("ReadAll(Body) = %v", err)
+			}
+			storedIndex = b
 			http.Error(w, "Created", http.StatusCreated)
 		case existingChildPath:
 			if r.Method == http.MethodHead {
@@ -1438,6 +1483,7 @@ func TestWriteForeignLayerIfOptionSet(t *testing.T) {
 	uploadPath := "/upload"
 	commitPath := "/commit"
 	var numUploads int32
+	var storedManifest []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, headPathPrefix) && r.URL.Path != initiatePath {
 			http.Error(w, "NotFound", http.StatusNotFound)
@@ -1463,14 +1509,25 @@ func TestWriteForeignLayerIfOptionSet(t *testing.T) {
 			http.Error(w, "Created", http.StatusCreated)
 		case manifestPath:
 			if r.Method == http.MethodHead {
-				w.Header().Set("Content-Type", string(types.DockerManifestSchema1Signed))
-				w.Header().Set("Docker-Content-Digest", fakeDigest)
-				w.Header().Set("Content-Length", "123")
+				if storedManifest == nil {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				h, _, _ := v1.SHA256(bytes.NewReader(storedManifest))
+				w.Header().Set("Content-Type", string(types.DockerManifestSchema2))
+				w.Header().Set("Docker-Content-Digest", h.String())
+				w.Header().Set("Content-Length", fmt.Sprint(len(storedManifest)))
+				w.WriteHeader(http.StatusOK)
 				return
 			}
 			if r.Method != http.MethodPut && r.Method != http.MethodHead {
 				t.Errorf("Method; got %v, want %v", r.Method, http.MethodPut)
 			}
+			b, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("ReadAll(Body) = %v", err)
+			}
+			storedManifest = b
 			http.Error(w, "Created", http.StatusCreated)
 		default:
 			t.Fatalf("Unexpected path: %v", r.URL.Path)

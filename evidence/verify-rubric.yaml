@@ -1,0 +1,22 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "发布开始先验证所有平台 descriptor、config 和 layer 的关系，缺失内容不会更新目标 tag。"
+  - id: 2
+    type: f2p
+    text: "目标仓库只在全部子 manifest 与必需 blob 校验完成后让新 tag 可见。"
+  - id: 3
+    type: f2p
+    text: "上传、认证、manifest 或 tag 更新失败时旧 tag 和既有镜像仍可拉取。"
+  - id: 4
+    type: f2p
+    text: "重试会复用相同 digest 的已确认 blob，不重复写入或删除其他 tag 正在引用的对象。"
+  - id: 5
+    type: f2p
+    text: "进程重启或连接超时后能区分已确认、待重试和未发布对象并收敛到唯一结果。"
+  - id: 6
+    type: p2p
+    text: "同一 tag 的并发发布不会产生混合平台清单，较旧发布不能覆盖较新成功结果。"
+  - id: 7
+    type: p2p
+    text: "Image、Copy、WriteLayer、不同 registry transport、认证缓存和只读拉取保持兼容。"

@@ -44,6 +44,13 @@ type Taggable interface {
 	RawManifest() ([]byte, error)
 }
 
+// errReferrersTagFallbackDisabled is wrapped by the post-commit referrers
+// hook when the registry lacks the Referrers API and fallback-tag behavior is
+// disabled. The manifest has been accepted by the registry, but callers must
+// see the configured-policy failure, so tag finalization treats it as
+// terminal instead of inferring success from tag verification.
+var errReferrersTagFallbackDisabled = errors.New("referrers tag fallback is disabled")
+
 // Write pushes the provided img to the specified image reference.
 func Write(ref name.Reference, img v1.Image, options ...Option) (rerr error) {
 	return Push(ref, img, options...)
@@ -536,7 +543,7 @@ func (w *writer) commitSubjectReferrers(ctx context.Context, sub name.Digest, ad
 		return nil
 	}
 	if !w.referrersTagFallback {
-		return fmt.Errorf("registry %s does not support the Referrers API and the referrers tag fallback is disabled", w.repo.RegistryStr())
+		return fmt.Errorf("registry %s does not support the Referrers API and the referrers tag fallback is disabled: %w", w.repo.RegistryStr(), errReferrersTagFallbackDisabled)
 	}
 
 	// The registry doesn't support Referrers API, we need to update the manifest tagged with the fallback tag.

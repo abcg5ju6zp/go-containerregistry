@@ -41,6 +41,13 @@ type remoteIndex struct {
 	manifest     []byte
 	mediaType    types.MediaType
 	descriptor   *v1.Descriptor
+
+	// Memoize child resolution so callers that need to inspect the full graph
+	// (e.g. validating it before publishing) and the upload walk share one
+	// fetch per child manifest.
+	childrenOnce sync.Once
+	children     []partial.Describable
+	childrenErr  error
 }
 
 // Index provides access to a remote index reference.
@@ -97,6 +104,16 @@ func (r *remoteIndex) IndexManifest() (*v1.IndexManifest, error) {
 		return nil, err
 	}
 	return v1.ParseIndexManifest(bytes.NewReader(b))
+}
+
+// Manifests satisfies partial.withManifests and memoizes child resolution;
+// graph validation (before upload) and the upload walk share the same set of
+// fetched children.
+func (r *remoteIndex) Manifests() ([]partial.Describable, error) {
+	r.childrenOnce.Do(func() {
+		r.children, r.childrenErr = partial.ComputeManifests(r)
+	})
+	return r.children, r.childrenErr
 }
 
 func (r *remoteIndex) Image(h v1.Hash) (v1.Image, error) {

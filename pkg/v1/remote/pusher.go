@@ -202,12 +202,22 @@ type repoWriter struct {
 	err error
 
 	work *workers
+
+	// confirms records digests verified present in the destination, so a tag
+	// move can be gated on the complete graph and so retries reuse blobs and
+	// manifests instead of uploading them again.
+	confirms *confirmations
+
+	// tagLocks holds one mutex per tag identifier so concurrent publishes of
+	// the same tag within this Pusher serialize their commit decisions.
+	tagLocks sync.Map // map[string]*sync.Mutex
 }
 
 // this will run once per repoWriter instance
 func (rw *repoWriter) init(ctx context.Context) error {
 	rw.once.Do(func() {
 		rw.work = &workers{}
+		rw.confirms = newConfirmations()
 		rw.w, rw.err = makeWriter(ctx, rw.repo, nil, rw.o)
 	})
 	return rw.err
@@ -303,6 +313,9 @@ func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t T
 
 	digest, err := m.Digest()
 	if errors.Is(err, stream.ErrNotComputed) {
+		// Streaming layers cannot be described until they are consumed, so
+		// upload them first and derive the digest afterwards. The tag is still
+		// only moved after every upload has completed.
 		if err := rw.writeDeps(ctx, m); err != nil {
 			return err
 		}
@@ -318,32 +331,117 @@ func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t T
 	}
 
 	// This may be a lazy child where we have no ref until digest is computed.
+	isRoot := ref != nil
 	if ref == nil {
 		ref = rw.repo.Digest(digest.String())
 	}
 
-	// For tags, we want to do this check outside of our Work.Do closure because
-	// we don't want to dedupe based on the manifest digest.
-	_, byTag := ref.(name.Tag)
-	if byTag {
-		if exists, err := rw.manifestExists(ctx, ref, t); err != nil {
+	if tag, ok := ref.(name.Tag); ok {
+		return rw.writeTagged(ctx, tag, m, needDeps)
+	}
+	return rw.writeDigestRef(ctx, ref, m, needDeps, isRoot)
+}
+
+// writeTagged publishes to a tag in two non-overlapping phases:
+//
+//  1. every referenced blob, config and child manifest is uploaded by digest
+//     (deduped through workers) and recorded in confirms;
+//  2. the tag is moved exactly once via finalizeTag, which verifies the
+//     resulting tag digest and converges retries and concurrent publishes.
+//
+// The tag is therefore untouched until the complete graph is confirmed: any
+// failure, cancellation or process exit during phase 1 leaves the tag at its
+// previous value, while already-confirmed content stays reusable for the next
+// attempt.
+func (rw *repoWriter) writeTagged(ctx context.Context, tag name.Tag, m manifest, needDeps bool) error {
+	// Serialize same-tag publishers across this Pusher: only one commit
+	// decision runs at a time, and followers observe a converged result.
+	tagMu := rw.tagLock(tag.Identifier())
+	tagMu.Lock()
+	defer tagMu.Unlock()
+
+	digest, err := m.Digest()
+	if err != nil {
+		return err
+	}
+
+	// Fast path: the tag already points at exactly this graph; do no uploads.
+	if exists, err := rw.manifestExists(ctx, tag, m); err != nil {
+		return err
+	} else if exists {
+		rw.confirms.mark(digest)
+		return nil
+	}
+
+	// Fix and validate the descriptor graph before mutating the repository.
+	// Graphs containing streamed layers cannot be frozen; the ordered upload
+	// below provides the same tag-last guarantee without up-front digests.
+	var graph *frozenGraph
+	if needDeps {
+		graph, err = freezeManifest(m, rw.o.allowNondistributableArtifacts)
+		if err != nil {
 			return err
-		} else if exists {
-			return nil
 		}
 	}
 
-	// The following work.Do will get deduped by digest, so it won't happen unless
-	// this tag happens to be the first commitManifest to run for that digest.
-	needPut := byTag
-
+	// This mirrors the dedupe bookkeeping in writeDigestRef: when our closure
+	// is deduped against an in-flight identical digest, the tag still has to
+	// be moved by this caller after phase 1 completes.
+	moveTag := true
 	if err := rw.work.Do(digest, func() error {
-		if !byTag {
-			if exists, err := rw.manifestExists(ctx, ref, t); err != nil {
+		if needDeps {
+			if err := rw.writeDeps(ctx, m); err != nil {
 				return err
-			} else if exists {
-				return nil
 			}
+		}
+		if graph != nil {
+			if err := graph.gate(rw.confirms); err != nil {
+				return err
+			}
+		}
+		moveTag = false
+		return rw.finalizeTag(ctx, tag, m)
+	}); err != nil {
+		return err
+	}
+
+	if !moveTag {
+		return nil
+	}
+
+	// The digest closure was run by another caller (a child manifest upload or
+	// a different tag); ensure this tag converges onto the confirmed content.
+	if graph != nil {
+		if err := graph.gate(rw.confirms); err != nil {
+			return err
+		}
+	}
+	return rw.finalizeTag(ctx, tag, m)
+}
+
+// writeDigestRef publishes content addressed only by its digest; there is no
+// tag that could be left pointing at a partial graph. Uploads are deduped by
+// digest and retried safely because storing content by digest is idempotent.
+func (rw *repoWriter) writeDigestRef(ctx context.Context, ref name.Reference, m manifest, needDeps, isRoot bool) error {
+	digest, err := m.Digest()
+	if err != nil {
+		return err
+	}
+
+	// Entry-point digest pushes still fix and validate the complete graph
+	// before mutating anything; child manifest writes are covered by their
+	// root's freeze. Graphs with streamed layers cannot be frozen.
+	if isRoot && needDeps {
+		if _, err := freezeManifest(m, rw.o.allowNondistributableArtifacts); err != nil {
+			return err
+		}
+	}
+
+	return rw.work.Do(digest, func() error {
+		if exists, err := rw.manifestExists(ctx, ref, m); err != nil {
+			return err
+		} else if exists {
+			return nil
 		}
 
 		if needDeps {
@@ -352,18 +450,12 @@ func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t T
 			}
 		}
 
-		needPut = false
-		return rw.commitManifest(ctx, ref, m)
-	}); err != nil {
-		return err
-	}
-
-	if !needPut {
+		if err := rw.commitManifest(ctx, ref, m); err != nil {
+			return err
+		}
+		rw.confirms.mark(digest)
 		return nil
-	}
-
-	// Only runs for tags that got deduped by digest.
-	return rw.commitManifest(ctx, ref, m)
+	})
 }
 
 func (rw *repoWriter) writeChildren(ctx context.Context, idx v1.ImageIndex) error {
@@ -450,6 +542,9 @@ func (rw *repoWriter) manifestExists(ctx context.Context, ref name.Reference, t 
 	if digest != got.Digest {
 		// Mark that we saw this digest in the registry so we don't have to check it again.
 		rw.work.Do(got.Digest, nop)
+		// The observed digest is confirmed present (it is not the content we
+		// are about to upload, but it can still be referenced safely).
+		rw.confirms.mark(got.Digest)
 
 		return false, nil
 	}
@@ -459,6 +554,10 @@ func (rw *repoWriter) manifestExists(ctx context.Context, ref name.Reference, t 
 	} else {
 		logs.Progress.Print("existing manifest: ", got.Digest)
 	}
+
+	// The exact manifest we wanted is already present; it is confirmed and
+	// must never be uploaded again.
+	rw.confirms.mark(got.Digest)
 
 	return true, nil
 }
@@ -550,7 +649,13 @@ func (rw *repoWriter) writeLayer(ctx context.Context, l v1.Layer) error {
 			}
 			rw.o.progress.total(size)
 		}
-		return rw.w.uploadOne(ctx, l)
+		if err := rw.w.uploadOne(ctx, l); err != nil {
+			return err
+		}
+		// Existing (HEAD), mounted or freshly committed: the blob is confirmed
+		// present by digest and safe to reuse on any later retry.
+		rw.confirms.mark(digest)
+		return nil
 	})
 }
 
@@ -567,6 +672,9 @@ func (rw *repoWriter) lazyWriteLayer(ctx context.Context, l v1.Layer) error {
 		}
 
 		rw.work.Do(digest, nop)
+		// Streaming blobs are only known after upload; the commit means they
+		// are confirmed and reusable on retry.
+		rw.confirms.mark(digest)
 
 		if rw.o.progress != nil {
 			size, err := l.Size()
