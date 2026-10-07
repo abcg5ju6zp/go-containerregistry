@@ -17,11 +17,14 @@ package tarball
 import (
 	"archive/tar"
 	"bytes"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -33,14 +36,16 @@ import (
 
 // WriteToFile writes in the compressed format to a tarball, on disk.
 // This is just syntactic sugar wrapping tarball.Write with a new file.
+//
+// The archive is built in an isolated, hidden candidate file in the same
+// directory and only replaces the destination once the full tarball
+// (manifest.json, config and every layer) has been written, synced and
+// re-read successfully. The replacement is atomic, so a failed, canceled or
+// interrupted export leaves any previously confirmed archive at p untouched.
 func WriteToFile(p string, ref name.Reference, img v1.Image, opts ...WriteOption) error {
-	w, err := os.Create(p)
-	if err != nil {
-		return err
-	}
-	defer w.Close()
-
-	return Write(ref, img, w, opts...)
+	return writeArchiveToFile(p, func(w io.Writer) error {
+		return Write(ref, img, w, opts...)
+	})
 }
 
 // MultiWriteToFile writes in the compressed format to a tarball, on disk.
@@ -55,14 +60,13 @@ func MultiWriteToFile(p string, tagToImage map[name.Tag]v1.Image, opts ...WriteO
 
 // MultiRefWriteToFile writes in the compressed format to a tarball, on disk.
 // This is just syntactic sugar wrapping tarball.MultiRefWrite with a new file.
+//
+// As with WriteToFile, the destination is replaced atomically: it never
+// observes a partially written archive.
 func MultiRefWriteToFile(p string, refToImage map[name.Reference]v1.Image, opts ...WriteOption) error {
-	w, err := os.Create(p)
-	if err != nil {
-		return err
-	}
-	defer w.Close()
-
-	return MultiRefWrite(refToImage, w, opts...)
+	return writeArchiveToFile(p, func(w io.Writer) error {
+		return MultiRefWrite(refToImage, w, opts...)
+	})
 }
 
 // Write is a wrapper to write a single image and tag to a tarball.
@@ -476,4 +480,238 @@ func layerExtension(l v1.Layer) string {
 		// historically, only gzip compressed tar was supported, so this is the fallback
 		return ".tar.gz"
 	}
+}
+
+// candidatePrefix returns the name prefix used for unconfirmed candidate
+// archives. Candidates are hidden dotfiles in the destination directory so
+// they never collide with the confirmed archive or with unrelated files.
+func candidatePrefix(base string) string {
+	return "." + base + ".tmp-"
+}
+
+// lockName returns the name of the file used to serialize concurrent exports
+// targeting the same destination. It must never match candidatePrefix.
+func lockName(base string) string {
+	return "." + base + ".lock"
+}
+
+// writeArchiveToFile runs write against an isolated candidate file in the
+// destination directory, verifies the resulting archive is fully readable,
+// syncs it to stable storage and only then atomically replaces p.
+//
+// On any failure (including a write error, a short write reported by the
+// compression layer, a Close error, or ENOSPC surfaced by Sync) the candidate
+// is removed and p is left untouched, so callers keep observing the previous
+// complete archive. Unconfirmed candidates abandoned by crashed or killed
+// processes are recovered or removed before writing. Exports to the same
+// destination are serialized with an advisory lock so concurrent runs never
+// delete each other's candidates or confirmed archives.
+func writeArchiveToFile(p string, write func(io.Writer) error) error {
+	dir := filepath.Dir(p)
+	base := filepath.Base(p)
+
+	lock, err := acquireTargetLock(filepath.Join(dir, lockName(base)))
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+
+	// The lock guarantees no other live export to p owns a candidate, so any
+	// matching file was abandoned by a process that died mid-write.
+	if err := recoverOrRemoveStaleCandidates(dir, base, p); err != nil {
+		return err
+	}
+
+	candidate, candidateName, err := createCandidateFile(dir, base)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			// Closing twice (after the explicit Close below) is harmless.
+			_ = candidate.Close()
+			_ = os.Remove(candidateName)
+		}
+	}()
+
+	if err := write(candidate); err != nil {
+		return err
+	}
+	// Make sure data hit stable storage before we trust it, surfacing errors
+	// (e.g. ENOSPC) that a deferred Close might otherwise swallow.
+	if err := candidate.Sync(); err != nil {
+		return fmt.Errorf("syncing image tarball: %w", err)
+	}
+	if err := verifyTarball(candidateName); err != nil {
+		return fmt.Errorf("unverified image tarball: %w", err)
+	}
+
+	// Preserve the permission bits of the archive being replaced, matching
+	// the behavior os.Create had when it truncated an existing file in
+	// place. A brand-new file already carries 0666 modified by the umask.
+	if fi, statErr := os.Stat(p); statErr == nil {
+		mode := fi.Mode().Perm() | (fi.Mode() & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky))
+		if err := candidate.Chmod(mode); err != nil {
+			return fmt.Errorf("preserving permissions of %q: %w", p, err)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
+
+	if err := candidate.Close(); err != nil {
+		return err
+	}
+	// Same directory, so this rename is atomic and never leaves p missing.
+	if err := os.Rename(candidateName, p); err != nil {
+		return fmt.Errorf("replacing %q: %w", p, err)
+	}
+	committed = true
+
+	// Persist the rename itself across a crash.
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("syncing archive directory: %w", err)
+	}
+	return nil
+}
+
+// createCandidateFile creates a fresh, uniquely named candidate with O_EXCL
+// so concurrent exports cannot share or steal one another's files.
+func createCandidateFile(dir, base string) (*os.File, string, error) {
+	var random [8]byte
+	for range 128 {
+		if _, err := cryptorand.Read(random[:]); err != nil {
+			return nil, "", fmt.Errorf("generating candidate file name: %w", err)
+		}
+		name := filepath.Join(dir, fmt.Sprintf("%s%x", candidatePrefix(base), random[:]))
+		// 0666 matches os.Create's requested mode (the process umask still
+		// applies); when replacing an archive we restore its recorded mode
+		// before the atomic rename.
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666) //nolint:gosec // G302: permissions intentionally match os.Create
+		if err == nil {
+			return f, name, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("could not create candidate file in %q", dir)
+}
+
+// recoverOrRemoveStaleCandidates disposes of candidate files left behind by
+// exports that did not finish (process exit, SIGKILL, crash, power loss).
+// Complete candidates are promoted to the destination; incomplete ones are
+// deleted. Any recovery or cleanup error is returned to the caller. The
+// destination itself and any unrelated files are never touched.
+func recoverOrRemoveStaleCandidates(dir, base, target string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("scanning stale archive candidates: %w", err)
+	}
+	prefix := candidatePrefix(base)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		candidate := filepath.Join(dir, entry.Name())
+		if verifyTarball(candidate) != nil {
+			if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("removing incomplete archive candidate %q: %w", candidate, err)
+			}
+			continue
+		}
+		// The candidate is complete but was never renamed to the destination.
+		// Recover it; our own export replaces it immediately afterwards, and
+		// if that export fails, the destination still holds this archive.
+		if err := os.Rename(candidate, target); err != nil {
+			return fmt.Errorf("recovering complete archive candidate %q: %w", candidate, err)
+		}
+	}
+	return nil
+}
+
+// syncDirectory flushes directory metadata (including renames) to disk.
+// Errors are returned so the caller can report that the rename was not
+// durably synchronized, even though the rename itself is atomic.
+func syncDirectory(dir string) error {
+	if d, err := os.Open(dir); err == nil {
+		syncErr := d.Sync()
+		closeErr := d.Close()
+		if syncErr != nil {
+			return syncErr
+		}
+		return closeErr
+	} else {
+		return err
+	}
+}
+
+// verifyTarball reopens the candidate independently of the writer and checks
+// that it is a complete, readable image tarball: the tar stream terminates
+// cleanly, every member is present in full, manifest.json parses, and every
+// config and layer referenced by the manifest is a member of the archive.
+func verifyTarball(p string) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return verifyArchive(f)
+}
+
+func verifyArchive(r io.Reader) error {
+	tr := tar.NewReader(r)
+	members := make(map[string]struct{})
+	var manifest []byte
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading tar header: %w", err)
+		}
+
+		// Consume the whole entry so a truncated archive (missing blocks, a
+		// cut-off layer or a short write padded by the tar writer) is caught.
+		var n int64
+		if path.Clean(hdr.Name) == "manifest.json" {
+			manifest, err = io.ReadAll(tr)
+			n = int64(len(manifest))
+		} else {
+			n, err = io.Copy(io.Discard, tr)
+		}
+		if err != nil {
+			return fmt.Errorf("reading tar member %q: %w", hdr.Name, err)
+		}
+		if n != hdr.Size {
+			return fmt.Errorf("tar member %q is truncated: read %d of %d bytes", hdr.Name, n, hdr.Size)
+		}
+		members[path.Clean(hdr.Name)] = struct{}{}
+	}
+
+	if len(manifest) == 0 {
+		return errors.New("manifest.json is missing or empty")
+	}
+	var m Manifest
+	if err := json.Unmarshal(manifest, &m); err != nil {
+		return fmt.Errorf("parsing manifest.json: %w", err)
+	}
+	if len(m) == 0 {
+		return errors.New("manifest.json contains no images")
+	}
+	for i, d := range m {
+		if d.Config == "" {
+			return fmt.Errorf("manifest entry %d has no config", i)
+		}
+		if _, ok := members[path.Clean(d.Config)]; !ok {
+			return fmt.Errorf("config %q referenced by manifest.json is missing", d.Config)
+		}
+		for _, l := range d.Layers {
+			if _, ok := members[path.Clean(l)]; !ok {
+				return fmt.Errorf("layer %q referenced by manifest.json is missing", l)
+			}
+		}
+	}
+	return nil
 }

@@ -1,0 +1,22 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "目标路径在候选完整验证前保持旧归档可读。"
+  - id: 2
+    type: f2p
+    text: "manifest、config 和全部 layer 的归档顺序、长度与摘要验证完成后才替换目标。"
+  - id: 3
+    type: f2p
+    text: "gzip 写入、Close、同步或磁盘失败时旧归档仍可被 ImageFromPath 打开。"
+  - id: 4
+    type: f2p
+    text: "短写、截断或尾随数据不会被误判为可导入镜像。"
+  - id: 5
+    type: f2p
+    text: "重启会清理未确认临时文件或完成唯一归档切换，不留下永久半成品。"
+  - id: 6
+    type: p2p
+    text: "并发导出互不覆盖，失败 writer 不能删除另一任务已确认的归档。"
+  - id: 7
+    type: p2p
+    text: "gzip 与非 gzip、权限、重复导出以及普通 ImageFromPath 行为保持通过。"

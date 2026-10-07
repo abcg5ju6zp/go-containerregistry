@@ -1,0 +1,16 @@
+项目：google-go-containerregistry｜题目 ID：google-go-containerregistry-53b41d8f-2793-427f-bb98-df800dff6569
+固定基线：017b006984036cc747b9bd4ed6eb2d59ee7a49dc｜Session：586499748533644:a6e687817b8222cfba7b7c5b2104e945_6ac5ead8419aca978daa035c.6ac5ead8419aca978daa035f.6ac5ead8419aca978daa035d:TraeCode CN.3.3.104.no_sid.no_ppe.T(2026/10/7 14:46:48)
+Harness：Trae｜有效轮数：49｜来源：count-trae-cn-steps.py｜范围：latest_turn
+完成度：完成｜收录结论：不收录
+验证命令：go test -count=1 ./pkg/v1/tarball
+
+Rubric ID：1｜状态：通过｜期望行为：目标路径在候选完整验证前保持旧归档可读。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/tarball/write.go; pkg/v1/tarball/write_atomic_test.go；go test -count=1 ./pkg/v1/tarball
+Rubric ID：2｜状态：通过｜期望行为：manifest、config 和全部 layer 的归档顺序、长度与摘要验证完成后才替换目标。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/tarball/write.go; pkg/v1/tarball/write_atomic_test.go；go test -count=1 ./pkg/v1/tarball
+Rubric ID：3｜状态：通过｜期望行为：gzip 写入、Close、同步或磁盘失败时旧归档仍可被 ImageFromPath 打开。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/tarball/write.go; pkg/v1/tarball/write_atomic_test.go；go test -count=1 ./pkg/v1/tarball
+Rubric ID：4｜状态：通过｜期望行为：短写、截断或尾随数据不会被误判为可导入镜像。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/tarball/write.go; pkg/v1/tarball/write_atomic_test.go；go test -count=1 ./pkg/v1/tarball
+Rubric ID：5｜状态：通过｜期望行为：重启会清理未确认临时文件或完成唯一归档切换，不留下永久半成品。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/tarball/write.go; pkg/v1/tarball/write_atomic_test.go；go test -count=1 ./pkg/v1/tarball
+Rubric ID：6｜状态：通过｜期望行为：并发导出互不覆盖，失败 writer 不能删除另一任务已确认的归档。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/tarball/write.go; pkg/v1/tarball/write_atomic_test.go；go test -count=1 ./pkg/v1/tarball
+Rubric ID：7｜状态：通过｜期望行为：gzip 与非 gzip、权限、重复导出以及普通 ImageFromPath 行为保持通过。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：pkg/v1/tarball/write.go; pkg/v1/tarball/write_atomic_test.go；go test -count=1 ./pkg/v1/tarball
+
+Prompt-Rubric 对齐：冻结 Prompt 已拆分为入口、状态、失败恢复、重启、并发和兼容性要求；每条 Rubric 均可回指原始 Prompt，未增加接口、文件、错误码、性能或部署条件。
+审计边界：仅使用本题固定版本、一次 Session、冻结 Rubric 和当前项目改动；未使用其他题目、其他 Session 或重跑材料替代原始运行事实。

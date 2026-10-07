@@ -334,10 +334,14 @@ func TestWriteSharedLayers(t *testing.T) {
 			t.Errorf("compare.Images: %v", err)
 		}
 	}
-	_, err = fp.Seek(0, io.SeekStart)
+	// Reopen by path: WriteToFile atomically replaces the path with a new
+	// inode, so the temp file descriptor created above no longer points at
+	// the confirmed archive.
+	rf, err := os.Open(fp.Name())
 	if err != nil {
-		t.Fatalf("Seek to start of file: %v", err)
+		t.Fatalf("Open exported tarball: %v", err)
 	}
+	defer rf.Close()
 	layers, err := randImage.Layers()
 	if err != nil {
 		t.Fatalf("Get image layers: %v", err)
@@ -353,7 +357,7 @@ func TestWriteSharedLayers(t *testing.T) {
 	}
 
 	const layerFileSuffix = ".tar.gz"
-	r := tar.NewReader(fp)
+	r := tar.NewReader(rf)
 	for {
 		hdr, err := r.Next()
 		if err != nil {
@@ -632,11 +636,13 @@ func TestWriteDynamicExtensions(t *testing.T) {
 		t.Fatalf("Unexpected error writing tarball: %v", err)
 	}
 
-	// 1. Verify files in tar archive have correct names
-	_, err = fp.Seek(0, io.SeekStart)
+	// 1. Verify files in tar archive have correct names. Reopen by path
+	// because WriteToFile replaces the path with a new inode.
+	rf, err := os.Open(fp.Name())
 	if err != nil {
-		t.Fatalf("Seek to start of file: %v", err)
+		t.Fatalf("Open exported tarball: %v", err)
 	}
+	defer rf.Close()
 
 	expectedFiles := map[string]bool{
 		gzipDigest.Hex + ".tar.gz":  false,
@@ -646,7 +652,7 @@ func TestWriteDynamicExtensions(t *testing.T) {
 
 	var manifestContent []byte
 
-	r := tar.NewReader(fp)
+	r := tar.NewReader(rf)
 	for {
 		hdr, err := r.Next()
 		if err != nil {
